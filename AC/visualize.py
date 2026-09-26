@@ -7,6 +7,7 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch, Rectangle
 import numpy as np
 import torch
+from rollout import encode_state
 
 
 # Okabe-Ito colors. Cell labels and line styles provide redundant encodings.
@@ -23,22 +24,16 @@ GRID_COLOR = "#333333"
 
 
 def _encode_state(state, cfg):
-    """Normalize a grid coordinate without importing the training pipeline."""
-    row_scale = max(1, cfg.env.row_num - 1)
-    col_scale = max(1, cfg.env.col_num - 1)
-    return np.asarray(
-        [state[0] / row_scale, state[1] / col_scale],
-        dtype=np.float32,
-    )
+    return encode_state(state, cfg)
 
 
-def _save_figure(fig, save_path):
+def _save_figure(fig, save_path, dpi=180):
     if save_path is None:
         return
 
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_path, dpi=180, facecolor="white")
+    fig.savefig(save_path, dpi=dpi, facecolor="white")
 
 
 def _prepare_history(history):
@@ -110,6 +105,7 @@ def plot_training_curve(
     save_path=None,
     show=True,
     smoothing_window=50,
+    dpi=180,
 ):
     """Plot available Actor-Critic metrics without mixing different y-scales."""
     metrics = _prepare_history(history)
@@ -181,7 +177,7 @@ def plot_training_curve(
 
         axes[-1].set_xlabel("Training iteration")
 
-    _save_figure(fig, save_path)
+    _save_figure(fig, save_path, dpi=dpi)
     if show:
         plt.show()
     return fig, axes
@@ -271,7 +267,7 @@ def _format_grid_axis(ax, rows, cols, title):
     ax.set(title=title, xlabel="Column", ylabel="Row")
 
 
-def plot_policy(runner, cfg, save_path=None, show=True):
+def plot_policy(runner, cfg, save_path=None, show=True, dpi=180):
     """Plot the Actor's greedy policy beside the Critic's state values."""
     policy, action_probabilities, state_values = compute_greedy_policy(
         runner, cfg
@@ -296,6 +292,10 @@ def plot_policy(runner, cfg, save_path=None, show=True):
 
         for row in range(rows):
             for col in range(cols):
+                if cfg.env.grid[row, col] == 2:
+                    policy_ax.text(col + 0.5, row + 0.55, "Terminal",
+                                   ha="center", va="center", fontsize=9)
+                    continue
                 action = int(policy[row, col])
                 confidence = float(action_probabilities[row, col, action])
                 center_x, center_y = col + 0.5, row + 0.5
@@ -328,7 +328,7 @@ def plot_policy(runner, cfg, save_path=None, show=True):
                 policy_ax.text(
                     center_x,
                     row + 0.88,
-                    f"{confidence:.2f}",
+                    f"{confidence:.4f}",
                     ha="center",
                     va="center",
                     fontsize=7,
@@ -341,7 +341,7 @@ def plot_policy(runner, cfg, save_path=None, show=True):
                 Patch(
                     facecolor=FORBIDDEN_COLOR,
                     edgecolor=GRID_COLOR,
-                    label="Forbidden (F)",
+                    label="Penalty cell (F)",
                 ),
                 Patch(
                     facecolor=TARGET_COLOR,
@@ -366,7 +366,7 @@ def plot_policy(runner, cfg, save_path=None, show=True):
         policy_ax.text(
             0.0,
             -0.08,
-            "Numbers show the selected action probability.",
+            "Selected action probabilities (rounded to 4 decimals).",
             transform=policy_ax.transAxes,
             ha="left",
             va="top",
@@ -377,10 +377,11 @@ def plot_policy(runner, cfg, save_path=None, show=True):
         value_min = float(np.nanmin(state_values))
         value_max = float(np.nanmax(state_values))
         if value_min < 0.0 < value_max:
+            magnitude = max(abs(value_min), abs(value_max))
             norm = mpl.colors.TwoSlopeNorm(
-                vmin=value_min,
+                vmin=-magnitude,
                 vcenter=0.0,
-                vmax=value_max,
+                vmax=magnitude,
             )
             cmap = "RdBu_r"
         else:
@@ -433,7 +434,7 @@ def plot_policy(runner, cfg, save_path=None, show=True):
         _format_grid_axis(value_ax, rows, cols, "Critic state value")
         fig.colorbar(image, ax=value_ax, label="Estimated V(s)", shrink=0.82)
 
-    _save_figure(fig, save_path)
+    _save_figure(fig, save_path, dpi=dpi)
     if show:
         plt.show()
 
@@ -442,3 +443,44 @@ def plot_policy(runner, cfg, save_path=None, show=True):
         "state_values": state_values,
     }
     return fig, (policy_ax, value_ax), policy, diagnostics
+
+
+def plot_convergence(evaluations, cfg, save_path=None, show=True, dpi=180):
+    """Exact all-state diagnostics, without smoothing or omitted evaluations."""
+    x = np.asarray([r['iteration'] for r in evaluations])
+    def series(key):
+        return np.asarray([r[key] for r in evaluations])
+    with plt.rc_context({'font.size': 10, 'axes.spines.top': False,
+                         'axes.spines.right': False}):
+        fig, axes = plt.subplots(4, 1, figsize=(8.2, 11), sharex=True, layout='constrained')
+        axes[0].plot(x, 100*series('optimal_action_fraction'), color='#0072B2')
+        axes[0].set(ylabel='Optimal actions (%)', ylim=(-2, 102),
+                    title='Exact evaluation of every nonterminal state (no smoothing)')
+        axes[1].plot(x, series('greedy_max_gap'), label='Greedy policy', color='#0072B2')
+        axes[1].plot(x, series('stochastic_max_gap'), label='Sampled policy', color='#D55E00', linestyle='--')
+        axes[1].axhline(cfg.rl.policy_tolerance, color='black', linestyle=':', label='Sampled-policy tolerance')
+        axes[1].set_yscale('symlog', linthresh=0.001)
+        axes[1].set_ylim(bottom=0)
+        axes[1].set(ylabel='Max value gap\n(symmetric log scale)')
+        axes[1].legend(frameon=False)
+        axes[2].plot(x, series('critic_max_error'), color='#009E73', label='Max |Critic - exact V(pi)|')
+        axes[2].axhline(cfg.rl.critic_tolerance, color='black', linestyle=':', label='Critic tolerance')
+        axes[2].set_yscale('symlog', linthresh=0.001)
+        axes[2].set_ylim(bottom=0)
+        axes[2].set(ylabel='Critic error\n(symmetric log scale)')
+        axes[2].legend(frameon=False)
+        for key, label, color, style in [
+            ('optimal_mean_value', 'Optimal', 'black', ':'),
+            ('greedy_mean_value', 'Greedy policy', '#0072B2', '-'),
+            ('stochastic_mean_value', 'Sampled policy', '#D55E00', '--')]:
+            axes[3].plot(x, series(key), label=label, color=color, linestyle=style)
+        samples = int(np.count_nonzero(cfg.env.grid != 2) * cfg.rl.batch_size)
+        axes[3].set(xlabel=f'Batch update ({samples} sampled transitions per update)',
+                    ylabel='Mean discounted return\n(uniform nonterminal starts)')
+        axes[3].legend(frameon=False)
+        for ax in axes:
+            ax.grid(True, alpha=0.25)
+    _save_figure(fig, save_path, dpi=dpi)
+    if show:
+        plt.show()
+    return fig, axes

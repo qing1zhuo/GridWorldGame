@@ -1,14 +1,7 @@
-import random
-from collections import deque
-from config import *
-from env import *
+"""One-hot features avoid interference between neighboring grid cells."""
 import numpy as np
-import torch
-def encode_state(state,cfg:config):
-    return np.array(
-        [
-            state[0]/(cfg.env.row_num-1),
-            state[1]/(cfg.env.col_num-1)
-        ],
-        dtype=np.float32
-    )
+
+def encode_state(state, cfg):
+    features = np.zeros(cfg.net.input_dim, dtype=np.float32)
+    features[state[0]*cfg.env.col_num+state[1]] = 1.0
+    return features

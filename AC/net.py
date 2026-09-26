@@ -1,27 +1,21 @@
 import torch
 from torch import nn
-from config import *
+
 class ActorCriticNet(nn.Module):
-    def __init__(self,cfg:config):
+    """Independent linear heads on one-hot states: tabular neural AC.
+
+    Values are exposed in original reward units; fitting uses reward_scale.
+    """
+    def __init__(self, cfg):
         super().__init__()
-        self.input_dim=cfg.net.input_dim
-        self.action_dim=cfg.net.action_dim
-        self.hidden_dim=cfg.net.hidden_dim
-        self.backbone_nums=len(self.hidden_dim)
+        self.actor_head = nn.Linear(cfg.net.input_dim,cfg.net.action_dim,bias=False)
+        self.critic_head = nn.Linear(cfg.net.input_dim,1,bias=False)
+        nn.init.zeros_(self.actor_head.weight)
+        nn.init.zeros_(self.critic_head.weight)
+        self.register_buffer("nonterminal",torch.tensor((cfg.env.grid.ravel()!=2).astype('float32')))
+        self.reward_scale = cfg.reward_scale
 
-        layers=[]
-        layers.append(nn.Linear(self.input_dim,self.hidden_dim[0]))
-        layers.append(nn.ReLU())
-        for i in range(self.backbone_nums-1):
-            layers.append(nn.Linear(self.hidden_dim[i],self.hidden_dim[i+1]))
-            layers.append(nn.ReLU())
-
-        self.backbone_model=nn.Sequential(*layers)
-        self.actor_head=nn.Linear(self.hidden_dim[-1],self.action_dim)
-        self.critic_head=nn.Linear(self.hidden_dim[-1],1)
-    def forward(self,state):
-        features=self.backbone_model(state)
-        action_score=self.actor_head(features)
-        state_value=self.critic_head(features).squeeze(-1)
-
-        return action_score,state_value
+    def forward(self, state):
+        logits = self.actor_head(state)
+        value = self.critic_head(state).squeeze(-1)*self.reward_scale
+        return logits,value*(state@self.nonterminal)

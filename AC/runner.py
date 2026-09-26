@@ -1,119 +1,54 @@
-import torch 
-import torch.nn.functional as F
+import torch
 from torch.distributions import Categorical
-from config import *
-from net import *
+from net import ActorCriticNet
 
-class DQN_Runner:
-    def __init__(self,cfg:config):
-        self.cfg=cfg
-        device_name=cfg.rl.device
-        if device_name=="auto":
-            device_name="cuda" if torch.cuda.is_available() else "cpu"
-        if str(device_name).startswith("cuda") and not torch.cuda.is_available():
-            raise RuntimeError("CUDA was requested, but torch.cuda.is_available() is False")
-        self.device=torch.device(device_name)
+class ActorCriticRunner:
+    def __init__(self, cfg):
+        self.cfg = cfg
+        name = cfg.rl.device
+        if name=='auto':
+            name='cuda' if torch.cuda.is_available() else 'cpu'
+        self.device = torch.device(name)
+        self.model = ActorCriticNet(cfg).to(self.device)
+        self.actor_optimizer = torch.optim.Adam(self.model.actor_head.parameters(),lr=cfg.rl.lr)
+        self.critic_optimizer = torch.optim.Adam(self.model.critic_head.parameters(),lr=cfg.rl.critic_lr)
+        self.updates = 0
 
-        self.model=ActorCriticNet(cfg).to(self.device)
-
-        self.optimizer=torch.optim.Adam(
-            self.model.parameters(),
-            lr=cfg.rl.lr
-        )
-    
-    def select_action(self,state,deterministic:bool=False):
-        state=torch.as_tensor(
-            state,dtype=torch.float32,device=self.device
-        ).unsqueeze(0)
-
+    def select_action(self, state, deterministic=False):
+        state = torch.as_tensor(state,dtype=torch.float32,device=self.device)
         with torch.no_grad():
-            action_scores,_=self.model(state)
-
-            if deterministic:
-                action=action_scores.argmax(dim=-1)
-            else:
-                distribution=Categorical(logits=action_scores)
-                action=distribution.sample()
-
+            logits,_ = self.model(state)
+            action = logits.argmax(-1) if deterministic else Categorical(logits=logits).sample()
         return int(action.item())
-    
-    def train_step(
-        self,
-        state,
-        action,
-        reward,
-        new_state,
-        done
-    ):
-        state=torch.as_tensor(
-            state,
-            dtype=torch.float32,
-            device=self.device
-        ).unsqueeze(0)
 
-        new_state=torch.as_tensor(
-            new_state,
-            dtype=torch.float32,
-            device=self.device
-        ).unsqueeze(0)
-
-        action=torch.as_tensor(
-            [action],
-            dtype=torch.long,
-            device=self.device
-        )
-        reward=torch.as_tensor(
-            [reward],
-            dtype=torch.float32,
-            device=self.device
-        )
-        done=torch.as_tensor(
-            [done],
-            dtype=torch.float32,
-            device=self.device
-        )
-
-        action_score,state_value=self.model(state)
-        # 把原始分数归一化，便于后续损失计算
-        distribution=Categorical(logits=action_score)
-
-        # 计算td_target
+    def train_batch(self, states, actions, rewards, next_states, dones):
+        """Sampled one-step AC. No optimal values/actions are supplied here."""
+        self.updates += 1
+        logits,values = self.model(states)
+        distribution = Categorical(logits=logits)
         with torch.no_grad():
-            _,new_state_value=self.model(new_state)
-            td_target=(
-                reward+self.cfg.rl.gamma*(1-done)*new_state_value
-            )
+            _,next_values = self.model(next_states)
+            targets = rewards+self.cfg.rl.gamma*(~dones)*next_values
+        advantage = (targets-values)/self.cfg.reward_scale
+        actor_loss = -(distribution.log_prob(actions)*advantage.detach()).mean()
+        critic_loss = advantage.square().mean()
+        entropy = distribution.entropy().mean()
+        entropy_coef = self.cfg.rl.entropy_coef*max(0.0,1-self.updates/self.cfg.rl.entropy_decay_steps)
+        decay = max(self.cfg.rl.min_lr_ratio,1-self.updates/self.cfg.rl.lr_decay_steps)
+        for group in self.actor_optimizer.param_groups:
+            group['lr']=self.cfg.rl.lr*decay
+        for group in self.critic_optimizer.param_groups:
+            group['lr']=self.cfg.rl.critic_lr*decay
+        self.actor_optimizer.zero_grad()
+        (actor_loss-entropy_coef*entropy).backward()
+        torch.nn.utils.clip_grad_norm_(self.model.actor_head.parameters(),self.cfg.rl.max_grad_norm)
+        self.actor_optimizer.step()
+        self.critic_optimizer.zero_grad()
+        critic_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.critic_head.parameters(),self.cfg.rl.max_grad_norm)
+        self.critic_optimizer.step()
+        return dict(loss=float(actor_loss.detach()+critic_loss.detach()-entropy_coef*entropy.detach()),
+            actor_loss=actor_loss.item(),critic_loss=critic_loss.item(),entropy=entropy.item(),
+            entropy_coef=entropy_coef,sampled_mean_reward=rewards.mean().item())
 
-        # 计算优势
-        advantage=td_target-state_value
-        
-        # 分别计算损失
-        actor_loss=-(
-            distribution.log_prob(action)*advantage.detach()
-        ).mean()
-        critic_loss=F.mse_loss(state_value,td_target)
-
-        # 熵，鼓励探索
-        entropy=-distribution.entropy().mean()
-
-        total_loss=actor_loss+self.cfg.rl.value_coef*critic_loss+self.cfg.rl.entropy_coef*entropy
-
-        self.optimizer.zero_grad()
-        total_loss.backward()
-
-        # 梯度裁剪，避免训练不稳定
-        torch.nn.utils.clip_grad_norm_(
-            self.model.parameters(),
-            self.cfg.rl.max_grad_norm
-        )
-
-        self.optimizer.step()
-
-        return {
-            "loss": total_loss.item(),
-            "actor_loss": actor_loss.item(),
-            "critic_loss": critic_loss.item(),
-            "entropy": entropy.item(),
-            "value": state_value.item(),
-            "advantage": advantage.item(),
-        }
+DQN_Runner = ActorCriticRunner  # backward-compatible import
