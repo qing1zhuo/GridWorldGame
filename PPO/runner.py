@@ -12,7 +12,9 @@ class GridWorld_Runner:
     def __init__(self,cfg):
         self.gamma=cfg.gamma
         self.clip_eps=cfg.clip_eps
-        self.entropy_coef=cfg.entropy_coef
+        self.entropy_coef_start=cfg.entropy_coef_start
+        self.entropy_coef_end=cfg.entropy_coef_end
+        self.train_iterations=cfg.train_iterations
         self.batch_size=cfg.batch_size
         self.actor=Actor(cfg)
         self.critic=Critic(cfg)
@@ -45,9 +47,11 @@ class GridWorld_Runner:
             actions=actions.cpu().numpy().astype(np.int64)
             return actions
 
-    def train_step(self):
+    def train_step(self,train_iteration):
         # 这里假定已经rollout过
         batch=self.rollout.sample(self.batch_size)
+
+        cur_entropy_coef=self.entropy_coef_start-(train_iteration/self.train_iterations)*(self.entropy_coef_start-self.entropy_coef_end)
 
         states,actions,rewards,new_states,old_log_probs,dones=batch
         states=torch.as_tensor(states,dtype=torch.long)
@@ -82,7 +86,7 @@ class GridWorld_Runner:
         )*advantages
         surrogate=torch.min(surrogate1,surrogate2)
         entropy_loss=new_dist.entropy().mean()
-        actor_loss=-surrogate.mean()-self.entropy_coef*entropy_loss
+        actor_loss=-surrogate.mean()-cur_entropy_coef*entropy_loss
 
         state_values=self.critic(states).squeeze(-1)
         critic_loss=F.mse_loss(state_values,td_targets)

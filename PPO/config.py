@@ -34,12 +34,14 @@ class GridWorld_Config:
         # runner config
         gamma=0.95,
         clip_eps=0.2,
-        entropy_coef=0.01,
+        entropy_coef_start=0.01,    # 其实熵权重
+        entropy_coef_end=0.001,     # 末尾熵权重
         batch_size=256,     # 训练一轮用多少条数据
-        # actor train config
         actor_lr=3e-4,
-        # critic train config
         critic_lr=3e-4,
+        # train config
+        train_iterations=1500,
+        update_per_iter=5
     ):
         self.rand_seed=rand_seed
 
@@ -62,7 +64,11 @@ class GridWorld_Config:
 
         self.gamma=gamma
         self.clip_eps=clip_eps
-        self.entropy_coef=entropy_coef
+        self.entropy_coef_start=entropy_coef_start
+        self.entropy_coef_end=entropy_coef_end
         self.batch_size=batch_size
         self.actor_lr=actor_lr
         self.critic_lr=critic_lr
+
+        self.train_iterations=train_iterations
+        self.update_per_iter=update_per_iter
